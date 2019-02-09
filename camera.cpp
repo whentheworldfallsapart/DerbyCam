@@ -11,6 +11,7 @@ using namespace std;
 int main(int, char **)
 {   //Config Parameters
     const unsigned BUF_SIZE = 90; //Buffer Size (number of frames)
+    const unsigned REFILL_NUM = 90; //number of frames to refill buffer before next trigger
     const int FRAME_DELAY = 120; //time in ms to delay between frames for slow motion reply
     const double DELAY_TIME_SECS = 1.5; //Time to delay before starting replay
     const int EROSION_SIZE = 6; //the erosion kernel size
@@ -25,12 +26,16 @@ int main(int, char **)
     double delay_secs = 0.0;
     bool replay = false; //flag for starting the replay (depend on motion trigger and delay comlpete)
     bool delay = false; //in the delay state (motion has been triggered but we dont want to replay instantly)
+    bool haveMotionBox = false; //flag to get motion box
     unsigned index = 0; //index into the buffer for reading
     unsigned count = 0; //number of frames captured
+    unsigned sinceLast = 0; //number of frames since last replay
     unsigned numFrames = 0;
     unsigned outLoop = 0; //size of the backend of the buffer incase we didnt fill it up
     int numPixels = 0; //number of pixels that passed motion after errode
+    cv::Rect2d roi; //rect box for crop image
     cv::Mat frame; //the captured and display frame
+    cv::Mat cropImg; //the motion frame
     cv::Mat fgMaskMOG2; //the motion frame
     cv::Mat erd; //the eroded motion frame
     cv::Ptr<BackgroundSubtractor> pMOG2; 
@@ -64,11 +69,31 @@ int main(int, char **)
             break;
         }
         else {
-            //apply background subtraction for motion detection
-            pMOG2->apply(frame, fgMaskMOG2);
-            // Apply erosion or dilation on the image to remove false alarms
-            cv::erode(fgMaskMOG2, erd, element); 
-            numPixels = countNonZero(erd); //check if some pixels or blobs passed the errode
+
+            //if we havnt got the rect box for motion
+            if (!(haveMotionBox) & count > 5) {
+                cv::putText(frame, "Select Motion ROI", cv::Point(30, 30), cv::FONT_HERSHEY_COMPLEX_SMALL, 0.8, cv::Scalar(255, 0, 0), 1, 0);
+                roi = cv::selectROI("Track Camera",frame);
+                std::cout << "ROI" << roi << std::endl;
+                cropImg = frame(roi);
+                //apply background subtraction for motion detection
+                pMOG2->apply(cropImg, fgMaskMOG2);
+                // Apply erosion or dilation on the image to remove false alarms
+                cv::erode(fgMaskMOG2, erd, element); 
+                numPixels = countNonZero(erd); //check if some pixels or blobs passed the errode
+                haveMotionBox = true;
+            } else if(haveMotionBox) {
+                //std::cout << "ROI" << roi << std::endl;
+                cropImg = frame(roi);
+                //apply background subtraction for motion detection
+                pMOG2->apply(cropImg, fgMaskMOG2);
+                // Apply erosion or dilation on the image to remove false alarms
+                cv::erode(fgMaskMOG2, erd, element); 
+                numPixels = countNonZero(erd); //check if some pixels or blobs passed the errode
+            } else {
+                numPixels = 0;
+            }
+
             //if the buffer isnt full yet
             if (count < BUF_SIZE) {
                 buffer.push_back(frame.clone());
@@ -82,12 +107,13 @@ int main(int, char **)
             }
             count++;
             index++;
+            sinceLast++;
         }//end capture/process frame
 
         //simple state machine
         //if if we had enough pixels pass the errode declare motion
         //check that we had at least 30 frames of videio and that we arent already in the delay state
-        if (numPixels > NUM_PIXELS_DTH & count > 30 & !(delay)) {
+        if (numPixels > NUM_PIXELS_DTH & sinceLast > REFILL_NUM & !(delay)) {
             //cout << "Pixels Passing : " << numPixels << endl;
             time(&delay_start); //start the delay timer
             delay = true; //transition to the delay state, where we wait before triggering replay
@@ -105,6 +131,8 @@ int main(int, char **)
 
         //if we are in the replay state, then show the replay once, else show live video
         if (replay) {
+            //reset number of frames since replay counter
+            sinceLast = 0;
             // End Time
             time(&end); //TODO: this is for FPS, only done once up until replay triggers, need to average fps continuely 
             //cout << "Frame: " << index << endl;
@@ -113,7 +141,7 @@ int main(int, char **)
             //get the oldests frames from the buffer by starting at the current index 
             for (int k = index; k < outLoop; k++) {
                 frame = buffer.at(k);
-                cv::putText(frame, "Replay.", cv::Point(30, 30), cv::FONT_HERSHEY_COMPLEX_SMALL, 0.8, cv::Scalar(0, 0, 255), 1, 0);
+                cv::putText(frame, "Replay", cv::Point(30, 30), cv::FONT_HERSHEY_COMPLEX_SMALL, 0.8, cv::Scalar(0, 0, 255), 1, 0);
                 //cout << "FrameFront: " << k << endl;
                 cv::imshow("Track Camera", frame);
                 if (cv::waitKey(FRAME_DELAY) == 32)
@@ -122,7 +150,7 @@ int main(int, char **)
             //when the end of the buffer is reach start at the front 
             for (int k = 0; k < index; k++) {
                 frame = buffer.at(k);
-                cv::putText(frame, "Replay.", cv::Point(30, 30), cv::FONT_HERSHEY_COMPLEX_SMALL, 0.8, cv::Scalar(0, 0, 255), 1, 0);
+                cv::putText(frame, "Replay", cv::Point(30, 30), cv::FONT_HERSHEY_COMPLEX_SMALL, 0.8, cv::Scalar(0, 0, 255), 1, 0);
                 //cout << "FrameBack: " << k << endl;
                 cv::imshow("Track Camera", frame);
                 if (cv::waitKey(FRAME_DELAY) == 32)
@@ -133,9 +161,11 @@ int main(int, char **)
         else
         {   //not in the Replay state so Live frames
             // show live and wait for a key with timeout long enough to show images
-            cv::putText(frame, "Live.", cv::Point(30, 30), cv::FONT_HERSHEY_COMPLEX_SMALL, 0.8, cv::Scalar(255, 0, 0), 1, 0);
+            cv::putText(frame, "Live", cv::Point(30, 30), cv::FONT_HERSHEY_COMPLEX_SMALL, 0.8, cv::Scalar(255, 0, 0), 1, 0);
             cv::imshow("Track Camera", frame);
-            //cv::imshow("FG Mask MOG 2", erd);
+            //if(haveMotionBox) {
+            //    cv::imshow("FG Mask MOG 2", erd);
+            //}
             if (cv::waitKey(1) == 32) {
                 break;
             }
